@@ -15,11 +15,11 @@ const DEFAULT_LOW_EXPOSURE_PERCENT = 56;
 const DEFAULT_WARM_TINT = 14;
 const DEFAULT_VIDEO_FIT_MODE = "cover";
 const PRESET_VERSION = 1;
-const CAPTION_FONT_SIZE = 72;
+const CAPTION_FONT_SIZE = 44;
 const DEFAULT_CAPTION_TOP = 49;
 const CAPTION_BAR_ALPHA = 0.52;
 const CAPTION_HORIZONTAL_PADDING = 58;
-const CAPTION_VERTICAL_PADDING_RATIO = 0.16;
+const CAPTION_VERTICAL_PADDING_RATIO = 0.31;
 const CAPTION_LINE_HEIGHT_RATIO = 1.12;
 const CAPTION_FONT_FAMILY = '"Helvetica Neue", Helvetica, Arial, sans-serif';
 const CAPTION_FONT_WEIGHT = 400;
@@ -37,9 +37,12 @@ const CAPTION_KERNING_PAIRS = {
   Ya: -0.016,
 };
 const MIME_CANDIDATES = [
-  "video/webm;codecs=vp9,opus",
-  "video/webm;codecs=vp8,opus",
-  "video/webm",
+  { mimeType: 'video/mp4;codecs="avc1.42E01E, mp4a.40.2"', extension: "mp4", label: "MP4" },
+  { mimeType: "video/mp4;codecs=avc1.42E01E,mp4a.40.2", extension: "mp4", label: "MP4" },
+  { mimeType: "video/mp4", extension: "mp4", label: "MP4" },
+  { mimeType: "video/webm;codecs=vp9,opus", extension: "webm", label: "WebM" },
+  { mimeType: "video/webm;codecs=vp8,opus", extension: "webm", label: "WebM" },
+  { mimeType: "video/webm", extension: "webm", label: "WebM" },
 ];
 const VIDEO_FIT_MODES = new Set(["cover", "contain", "stretch"]);
 
@@ -243,9 +246,15 @@ function resolveTimelineTime(timeline, seconds) {
   };
 }
 
-function getBestMimeType() {
-  if (typeof MediaRecorder === "undefined") return "";
-  return MIME_CANDIDATES.find((type) => MediaRecorder.isTypeSupported(type)) || "";
+function getExportFormatForMime(mimeType) {
+  return mimeType.toLowerCase().includes("mp4")
+    ? { extension: "mp4", label: "MP4" }
+    : { extension: "webm", label: "WebM" };
+}
+
+function getBestRecordingFormat() {
+  if (typeof MediaRecorder === "undefined") return null;
+  return MIME_CANDIDATES.find(({ mimeType }) => MediaRecorder.isTypeSupported(mimeType)) || null;
 }
 
 function kerningBetween(left, right, fontSize) {
@@ -289,6 +298,42 @@ function seekVideo(video, seconds) {
     video.addEventListener("seeked", done, { once: true });
     video.addEventListener("error", fail, { once: true });
     video.currentTime = seconds;
+  });
+}
+
+function waitForDrawableVideoFrame(video) {
+  return new Promise((resolve, reject) => {
+    let timeoutId = null;
+
+    const cleanup = () => {
+      if (timeoutId) window.clearTimeout(timeoutId);
+      video.removeEventListener("loadeddata", done);
+      video.removeEventListener("canplay", done);
+      video.removeEventListener("error", fail);
+    };
+    const done = () => {
+      cleanup();
+      resolve(video);
+    };
+    const fail = () => {
+      cleanup();
+      reject(new Error("Could not load a video frame."));
+    };
+
+    if (video.readyState >= 2) {
+      requestAnimationFrame(done);
+      return;
+    }
+
+    if (typeof video.requestVideoFrameCallback === "function") {
+      timeoutId = window.setTimeout(done, 500);
+      video.requestVideoFrameCallback(done);
+      return;
+    }
+
+    video.addEventListener("loadeddata", done, { once: true });
+    video.addEventListener("canplay", done, { once: true });
+    video.addEventListener("error", fail, { once: true });
   });
 }
 
@@ -513,11 +558,13 @@ async function renderSequence({
   onStatus,
   onProgress,
 }) {
-  const mimeType = getBestMimeType();
+  const recordingFormat = getBestRecordingFormat();
 
-  if (!mimeType) {
+  if (!recordingFormat) {
     throw new Error("This browser does not support MediaRecorder video export.");
   }
+
+  const mimeType = recordingFormat.mimeType;
 
   const canvas = document.createElement("canvas");
   canvas.width = OUTPUT_WIDTH;
@@ -566,6 +613,13 @@ async function renderSequence({
   const playbackDurations = clips.map((clip, index) => getClipPlaybackDuration(clip, index, switchSettings));
   const totalDuration = Math.max(0.001, timeline.totalDuration);
   let completedSeconds = 0;
+  let recorderStarted = false;
+
+  const startRecorder = () => {
+    if (recorderStarted) return;
+    recorder.start(250);
+    recorderStarted = true;
+  };
 
   recorder.ondataavailable = (event) => {
     if (event.data.size > 0) chunks.push(event.data);
@@ -575,8 +629,6 @@ async function renderSequence({
     recorder.onstop = resolve;
     recorder.onerror = () => reject(new Error("Recorder failed while exporting."));
   });
-
-  recorder.start(250);
 
   try {
     for (let index = 0; index < clips.length; index += 1) {
@@ -619,14 +671,18 @@ async function renderSequence({
 
       const playbackStart = getClipPlaybackStart(clip, index, switchSettings);
       await seekVideo(video, playbackStart);
+      await waitForDrawableVideoFrame(video);
 
       if (playbackStart < trimEnd - 0.005) {
         await video.play();
+        drawFrame(ctx, video, options);
+        startRecorder();
         await drawVideoSegment(video, ctx, options, playbackStart, trimEnd, (clipSeconds) => {
           onProgress(Math.min(1, (completedSeconds + clipSeconds) / totalDuration));
         });
       } else {
         drawFrame(ctx, video, options);
+        startRecorder();
       }
 
       completedSeconds += playbackDurations[index] || 0;
@@ -646,15 +702,23 @@ async function renderSequence({
       }
     }
   } finally {
-    recorder.stop();
+    if (recorderStarted && recorder.state !== "inactive") {
+      recorder.stop();
+    }
     streamTracks.forEach((track) => track.stop());
     if (audioContext) await audioContext.close();
   }
 
-  await stopped;
+  if (recorderStarted) {
+    await stopped;
+  }
+  const recordedMimeType = recorder.mimeType || mimeType;
+  const recordedFormat = getExportFormatForMime(recordedMimeType);
   return {
-    blob: new Blob(chunks, { type: mimeType }),
-    mimeType,
+    blob: new Blob(chunks, { type: recordedMimeType }),
+    mimeType: recordedMimeType,
+    extension: recordedFormat.extension,
+    label: recordedFormat.label,
   };
 }
 
@@ -1500,6 +1564,8 @@ function RenderPanel({
   keepAudio,
   setKeepAudio,
   outputUrl,
+  outputLabel,
+  outputExtension,
   isRendering,
   renderProgress,
   renderStatus,
@@ -1647,8 +1713,8 @@ function RenderPanel({
         <progress max="1" value={renderProgress} />
       </div>
       {outputUrl ? (
-        <a className="download-link" href={outputUrl} download="snapad-captioned.webm">
-          Download WebM
+        <a className="download-link" href={outputUrl} download={`snapad-captioned.${outputExtension}`}>
+          Download {outputLabel}
         </a>
       ) : null}
     </section>
@@ -1669,6 +1735,8 @@ export default function App() {
   const [warmTint, setWarmTint] = useState(DEFAULT_WARM_TINT);
   const [keepAudio, setKeepAudio] = useState(true);
   const [outputUrl, setOutputUrl] = useState("");
+  const [outputLabel, setOutputLabel] = useState("MP4");
+  const [outputExtension, setOutputExtension] = useState("mp4");
   const [isRendering, setIsRendering] = useState(false);
   const [renderProgress, setRenderProgress] = useState(0);
   const [renderStatus, setRenderStatus] = useState("Ready");
@@ -1900,8 +1968,10 @@ export default function App() {
         onProgress: setRenderProgress,
       });
       setOutputUrl(URL.createObjectURL(result.blob));
+      setOutputLabel(result.label);
+      setOutputExtension(result.extension);
       setRenderProgress(1);
-      setRenderStatus(`Rendered ${(result.blob.size / 1024 / 1024).toFixed(1)} MB ${result.mimeType}`);
+      setRenderStatus(`Rendered ${(result.blob.size / 1024 / 1024).toFixed(1)} MB ${result.label}`);
     } catch (error) {
       setRenderStatus(error.message);
     } finally {
@@ -1967,6 +2037,8 @@ export default function App() {
           keepAudio={keepAudio}
           setKeepAudio={setKeepAudio}
           outputUrl={outputUrl}
+          outputLabel={outputLabel}
+          outputExtension={outputExtension}
           isRendering={isRendering}
           renderProgress={renderProgress}
           renderStatus={renderStatus}
