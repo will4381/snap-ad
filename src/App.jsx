@@ -433,6 +433,11 @@ function drawCaption(ctx, text, fontSize, topPercent, width, height) {
   const caption = text.trim();
   if (!caption) return;
 
+  ctx.save();
+  ctx.globalAlpha = 1;
+  ctx.globalCompositeOperation = "source-over";
+  ctx.filter = "none";
+
   const paddingX = CAPTION_HORIZONTAL_PADDING;
   const paddingY = Math.round(fontSize * CAPTION_VERTICAL_PADDING_RATIO);
   const lineHeight = Math.round(fontSize * CAPTION_LINE_HEIGHT_RATIO);
@@ -453,14 +458,15 @@ function drawCaption(ctx, text, fontSize, topPercent, width, height) {
   ctx.fillRect(x, y, bandWidth, bandHeight);
 
   ctx.fillStyle = "#fff";
-  ctx.shadowColor = "rgba(0, 0, 0, 0.16)";
+  ctx.shadowColor = "transparent";
   ctx.shadowBlur = 0;
-  ctx.shadowOffsetY = 1;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
   lines.forEach((line, index) => {
     const textY = y + paddingY + lineHeight / 2 + index * lineHeight;
     drawTrackedText(ctx, line, width / 2, textY, trackingPx, fontSize);
   });
-  ctx.shadowOffsetY = 0;
+  ctx.restore();
 }
 
 function drawFrame(ctx, video, options, effects = {}) {

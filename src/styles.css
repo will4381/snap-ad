@@ -328,7 +328,10 @@ button:not(:disabled):hover,
   font-kerning: normal;
   font-feature-settings: "kern" 1;
   overflow-wrap: anywhere;
-  text-shadow: 0 1px 0 rgba(0, 0, 0, 0.16);
+  opacity: 1;
+  mix-blend-mode: normal;
+  -webkit-text-fill-color: #fff;
+  text-shadow: none;
   z-index: 3;
 }
 
