@@ -376,110 +376,133 @@ function captureVideoFrame(video) {
   }
 }
 
-function escapeHtml(value) {
-  return String(value).replace(/[&<>"']/g, (char) => {
-    const entities = {
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      '"': "&quot;",
-      "'": "&#39;",
-    };
-    return entities[char];
+function setCaptionTextStyle(ctx, fontSize) {
+  ctx.font = `${CAPTION_FONT_WEIGHT} ${fontSize}px ${CAPTION_FONT_FAMILY}`;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  ctx.fillStyle = "#fff";
+}
+
+function measureCaptionText(ctx, text, fontSize) {
+  const chars = Array.from(text);
+  if (chars.length === 0) return 0;
+
+  const trackingPx = fontSize * CAPTION_TRACKING_EM;
+  return chars.reduce((width, char, index) => {
+    const spacing = index < chars.length - 1 ? trackingPx : 0;
+    return width + ctx.measureText(char).width + spacing;
+  }, 0);
+}
+
+function drawCaptionText(ctx, text, centerX, centerY, fontSize) {
+  const chars = Array.from(text);
+  const trackingPx = fontSize * CAPTION_TRACKING_EM;
+  let x = centerX - measureCaptionText(ctx, text, fontSize) / 2;
+
+  chars.forEach((char, index) => {
+    ctx.fillText(char, x + ctx.measureText(char).width / 2, centerY);
+    x += ctx.measureText(char).width;
+    if (index < chars.length - 1) x += trackingPx;
   });
 }
 
-function cssNumber(value, digits = 4) {
-  return Number(value).toFixed(digits).replace(/\.?0+$/, "");
-}
+function wrapCaptionLine(ctx, text, maxWidth, fontSize) {
+  if (measureCaptionText(ctx, text, fontSize) <= maxWidth) return [text];
 
-function loadSvgImage(svg) {
-  return new Promise((resolve, reject) => {
-    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
-    const image = new Image();
+  const chunks = [];
+  let chunk = "";
 
-    image.onload = () => resolve({ image, url });
-    image.onerror = () => {
-      URL.revokeObjectURL(url);
-      reject(new Error("Could not render the caption layer."));
-    };
-    image.src = url;
+  Array.from(text).forEach((char) => {
+    const nextChunk = `${chunk}${char}`;
+    if (chunk && measureCaptionText(ctx, nextChunk, fontSize) > maxWidth) {
+      chunks.push(chunk);
+      chunk = char;
+    } else {
+      chunk = nextChunk;
+    }
   });
+
+  if (chunk) chunks.push(chunk);
+  return chunks;
 }
 
-async function createCaptionOverlay({ caption, captionTop, width, height }) {
+function wrapCaptionText(ctx, text, maxWidth, fontSize) {
+  const words = text.trim().split(/\s+/).filter(Boolean);
+  const lines = [];
+  let line = "";
+
+  words.forEach((word) => {
+    const testLine = line ? `${line} ${word}` : word;
+    if (measureCaptionText(ctx, testLine, fontSize) <= maxWidth || !line) {
+      line = testLine;
+      return;
+    }
+
+    lines.push(...wrapCaptionLine(ctx, line, maxWidth, fontSize));
+    line = word;
+  });
+
+  if (line) lines.push(...wrapCaptionLine(ctx, line, maxWidth, fontSize));
+  return lines.length > 0 ? lines.slice(0, 3) : [""];
+}
+
+function createCaptionLayout({ caption, captionTop, width, height }) {
   const trimmedCaption = caption.trim();
   if (!trimmedCaption) return null;
 
   const fontSize = getExportCaptionFontSize(width);
-  const rootStyle = [
-    "position:relative",
-    `width:${width}px`,
-    `height:${height}px`,
-    "overflow:hidden",
-  ].join(";");
-  const bandStyle = [
-    "position:absolute",
-    "left:0",
-    "right:0",
-    `top:${cssNumber(captionTop)}%`,
-    "transform:translateY(-50%)",
-    "box-sizing:border-box",
-    `padding:${cssNumber(CAPTION_VERTICAL_PADDING_RATIO)}em ${cssNumber(CAPTION_HORIZONTAL_PADDING_EM)}em`,
-    `background:rgba(0, 0, 0, ${cssNumber(CAPTION_BAR_ALPHA)})`,
-    "color:#fff",
-    "display:flex",
-    "align-items:center",
-    "justify-content:center",
-    "text-align:center",
-    `font-family:${CAPTION_FONT_FAMILY}`,
-    `font-size:${cssNumber(fontSize)}px`,
-    `font-weight:${CAPTION_FONT_WEIGHT}`,
-    `line-height:${cssNumber(CAPTION_LINE_HEIGHT_RATIO)}`,
-    `letter-spacing:${cssNumber(CAPTION_TRACKING_EM)}em`,
-    "font-kerning:normal",
-    "font-feature-settings:'kern' 1",
-    "overflow-wrap:anywhere",
-    "opacity:1",
-    "mix-blend-mode:normal",
-    "-webkit-text-fill-color:#fff",
-    "text-shadow:none",
-  ].join(";");
-  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-  <foreignObject x="0" y="0" width="${width}" height="${height}">
-    <div xmlns="http://www.w3.org/1999/xhtml" style="${escapeHtml(rootStyle)}">
-      <div style="${escapeHtml(bandStyle)}">${escapeHtml(trimmedCaption)}</div>
-    </div>
-  </foreignObject>
-</svg>`;
+  const measureCanvas = document.createElement("canvas");
+  const measureCtx = measureCanvas.getContext("2d");
+  setCaptionTextStyle(measureCtx, fontSize);
 
-  return loadSvgImage(svg);
+  const paddingX = fontSize * CAPTION_HORIZONTAL_PADDING_EM;
+  const paddingY = fontSize * CAPTION_VERTICAL_PADDING_RATIO;
+  const lineHeight = fontSize * CAPTION_LINE_HEIGHT_RATIO;
+  const lines = wrapCaptionText(measureCtx, trimmedCaption, width - paddingX * 2, fontSize);
+  const bandHeight = Math.round(lines.length * lineHeight + paddingY * 2);
+
+  return {
+    lines,
+    fontSize,
+    lineHeight,
+    paddingY,
+    bandHeight,
+    y: Math.round(height * (captionTop / 100) - bandHeight / 2),
+  };
 }
 
-function cleanupCaptionOverlay(captionOverlay) {
-  if (captionOverlay?.url) URL.revokeObjectURL(captionOverlay.url);
-}
-
-function drawCaptionOverlay(ctx, captionOverlay, width, height) {
-  if (!captionOverlay?.image) return;
+function drawCaptionLayout(ctx, captionLayout, width) {
+  if (!captionLayout) return;
 
   ctx.save();
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = "source-over";
   ctx.filter = "none";
-  ctx.drawImage(captionOverlay.image, 0, 0, width, height);
+  ctx.shadowColor = "transparent";
+  ctx.shadowBlur = 0;
+  ctx.shadowOffsetX = 0;
+  ctx.shadowOffsetY = 0;
+
+  ctx.fillStyle = `rgba(0, 0, 0, ${CAPTION_BAR_ALPHA})`;
+  ctx.fillRect(0, captionLayout.y, width, captionLayout.bandHeight);
+
+  setCaptionTextStyle(ctx, captionLayout.fontSize);
+  captionLayout.lines.forEach((line, index) => {
+    const textY = captionLayout.y + captionLayout.paddingY + captionLayout.lineHeight / 2 + index * captionLayout.lineHeight;
+    drawCaptionText(ctx, line, width / 2, textY, captionLayout.fontSize);
+  });
   ctx.restore();
 }
 
 function drawFrame(ctx, video, options, effects = {}) {
-  const { captionOverlay, videoFitMode, width, height } = options;
+  const { captionLayout, videoFitMode, width, height } = options;
   const { brightness = 1, warmth = 0 } = effects;
   drawVideoFit(ctx, video, width, height, brightness, videoFitMode);
   if (warmth > 0) {
     ctx.fillStyle = `rgba(255, 212, 92, ${percentToDecimal(warmth)})`;
     ctx.fillRect(0, 0, width, height);
   }
-  drawCaptionOverlay(ctx, captionOverlay, width, height);
+  drawCaptionLayout(ctx, captionLayout, width);
 }
 
 function drawVideoSegment(video, ctx, options, startTime, endTime, onProgress) {
@@ -601,14 +624,14 @@ async function renderSequence({
   const mediaStream = new MediaStream(streamTracks);
   const recorder = new MediaRecorder(mediaStream, { mimeType });
   const chunks = [];
-  const captionOverlay = await createCaptionOverlay({
+  const captionLayout = createCaptionLayout({
     caption,
     captionTop,
     width: OUTPUT_WIDTH,
     height: OUTPUT_HEIGHT,
   });
   const options = {
-    captionOverlay,
+    captionLayout,
     videoFitMode,
     width: OUTPUT_WIDTH,
     height: OUTPUT_HEIGHT,
@@ -716,7 +739,6 @@ async function renderSequence({
     if (recorderStarted && recorder.state !== "inactive") {
       recorder.stop();
     }
-    cleanupCaptionOverlay(captionOverlay);
     streamTracks.forEach((track) => track.stop());
     if (audioContext) await audioContext.close();
   }
