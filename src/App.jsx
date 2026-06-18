@@ -16,26 +16,16 @@ const DEFAULT_WARM_TINT = 14;
 const DEFAULT_VIDEO_FIT_MODE = "cover";
 const PRESET_VERSION = 1;
 const CAPTION_FONT_SIZE = 44;
+const PREVIEW_CAPTION_FRAME_WIDTH = 430;
+const PREVIEW_CAPTION_FONT_DIVISOR = 4.25;
 const DEFAULT_CAPTION_TOP = 49;
 const CAPTION_BAR_ALPHA = 0.52;
-const CAPTION_HORIZONTAL_PADDING = 58;
+const CAPTION_HORIZONTAL_PADDING_EM = 1.35;
 const CAPTION_VERTICAL_PADDING_RATIO = 0.31;
 const CAPTION_LINE_HEIGHT_RATIO = 1.12;
 const CAPTION_FONT_FAMILY = '"Helvetica Neue", Helvetica, Arial, sans-serif';
 const CAPTION_FONT_WEIGHT = 400;
 const CAPTION_TRACKING_EM = -0.015;
-const CAPTION_KERNING_PAIRS = {
-  AV: -0.045,
-  VA: -0.035,
-  AY: -0.035,
-  YA: -0.03,
-  AW: -0.035,
-  WA: -0.025,
-  AT: -0.025,
-  TA: -0.02,
-  Yo: -0.018,
-  Ya: -0.016,
-};
 const MIME_CANDIDATES = [
   { mimeType: 'video/mp4;codecs="avc1.42E01E, mp4a.40.2"', extension: "mp4", label: "MP4" },
   { mimeType: "video/mp4;codecs=avc1.42E01E,mp4a.40.2", extension: "mp4", label: "MP4" },
@@ -106,6 +96,14 @@ function formatMs(value) {
 
 function percentToDecimal(value) {
   return clamp(value, 0, 100) / 100;
+}
+
+function getPreviewCaptionFontSize() {
+  return Math.max(17, Math.round(CAPTION_FONT_SIZE / PREVIEW_CAPTION_FONT_DIVISOR));
+}
+
+function getExportCaptionFontSize(width) {
+  return getPreviewCaptionFontSize() * (width / PREVIEW_CAPTION_FRAME_WIDTH);
 }
 
 function presetNumber(value, fallback, min, max) {
@@ -257,10 +255,6 @@ function getBestRecordingFormat() {
   return MIME_CANDIDATES.find(({ mimeType }) => MediaRecorder.isTypeSupported(mimeType)) || null;
 }
 
-function kerningBetween(left, right, fontSize) {
-  return (CAPTION_KERNING_PAIRS[`${left}${right}`] || 0) * fontSize;
-}
-
 function settleWithTimeout(promise, milliseconds) {
   return Promise.race([
     promise.then(() => true).catch(() => false),
@@ -382,102 +376,110 @@ function captureVideoFrame(video) {
   }
 }
 
-function measureTrackedText(ctx, text, trackingPx, fontSize) {
-  const chars = Array.from(text);
-  if (chars.length === 0) return 0;
-
-  return chars.reduce((width, char, index) => {
-    const next = chars[index + 1];
-    const spacing = next ? trackingPx + kerningBetween(char, next, fontSize) : 0;
-    return width + ctx.measureText(char).width + spacing;
-  }, 0);
-}
-
-function drawTrackedText(ctx, text, centerX, y, trackingPx, fontSize) {
-  const chars = Array.from(text);
-  const totalWidth = measureTrackedText(ctx, text, trackingPx, fontSize);
-  let x = centerX - totalWidth / 2;
-
-  chars.forEach((char, index) => {
-    const next = chars[index + 1];
-    ctx.fillText(char, x, y);
-    x += ctx.measureText(char).width;
-    if (next) {
-      x += trackingPx + kerningBetween(char, next, fontSize);
-    }
+function escapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (char) => {
+    const entities = {
+      "&": "&amp;",
+      "<": "&lt;",
+      ">": "&gt;",
+      '"': "&quot;",
+      "'": "&#39;",
+    };
+    return entities[char];
   });
 }
 
-function wrapCaption(ctx, text, maxWidth, trackingPx, fontSize) {
-  const words = text.trim().split(/\s+/).filter(Boolean);
-  if (words.length === 0) return [""];
-
-  const lines = [];
-  let line = "";
-
-  for (const word of words) {
-    const test = line ? `${line} ${word}` : word;
-    if (measureTrackedText(ctx, test, trackingPx, fontSize) <= maxWidth || !line) {
-      line = test;
-    } else {
-      lines.push(line);
-      line = word;
-    }
-  }
-
-  if (line) lines.push(line);
-  return lines.slice(0, 3);
+function cssNumber(value, digits = 4) {
+  return Number(value).toFixed(digits).replace(/\.?0+$/, "");
 }
 
-function drawCaption(ctx, text, fontSize, topPercent, width, height) {
-  const caption = text.trim();
-  if (!caption) return;
+function loadSvgImage(svg) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([svg], { type: "image/svg+xml;charset=utf-8" }));
+    const image = new Image();
+
+    image.onload = () => resolve({ image, url });
+    image.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Could not render the caption layer."));
+    };
+    image.src = url;
+  });
+}
+
+async function createCaptionOverlay({ caption, captionTop, width, height }) {
+  const trimmedCaption = caption.trim();
+  if (!trimmedCaption) return null;
+
+  const fontSize = getExportCaptionFontSize(width);
+  const rootStyle = [
+    "position:relative",
+    `width:${width}px`,
+    `height:${height}px`,
+    "overflow:hidden",
+  ].join(";");
+  const bandStyle = [
+    "position:absolute",
+    "left:0",
+    "right:0",
+    `top:${cssNumber(captionTop)}%`,
+    "transform:translateY(-50%)",
+    "box-sizing:border-box",
+    `padding:${cssNumber(CAPTION_VERTICAL_PADDING_RATIO)}em ${cssNumber(CAPTION_HORIZONTAL_PADDING_EM)}em`,
+    `background:rgba(0, 0, 0, ${cssNumber(CAPTION_BAR_ALPHA)})`,
+    "color:#fff",
+    "display:flex",
+    "align-items:center",
+    "justify-content:center",
+    "text-align:center",
+    `font-family:${CAPTION_FONT_FAMILY}`,
+    `font-size:${cssNumber(fontSize)}px`,
+    `font-weight:${CAPTION_FONT_WEIGHT}`,
+    `line-height:${cssNumber(CAPTION_LINE_HEIGHT_RATIO)}`,
+    `letter-spacing:${cssNumber(CAPTION_TRACKING_EM)}em`,
+    "font-kerning:normal",
+    "font-feature-settings:'kern' 1",
+    "overflow-wrap:anywhere",
+    "opacity:1",
+    "mix-blend-mode:normal",
+    "-webkit-text-fill-color:#fff",
+    "text-shadow:none",
+  ].join(";");
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <foreignObject x="0" y="0" width="${width}" height="${height}">
+    <div xmlns="http://www.w3.org/1999/xhtml" style="${escapeHtml(rootStyle)}">
+      <div style="${escapeHtml(bandStyle)}">${escapeHtml(trimmedCaption)}</div>
+    </div>
+  </foreignObject>
+</svg>`;
+
+  return loadSvgImage(svg);
+}
+
+function cleanupCaptionOverlay(captionOverlay) {
+  if (captionOverlay?.url) URL.revokeObjectURL(captionOverlay.url);
+}
+
+function drawCaptionOverlay(ctx, captionOverlay, width, height) {
+  if (!captionOverlay?.image) return;
 
   ctx.save();
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = "source-over";
   ctx.filter = "none";
-
-  const paddingX = CAPTION_HORIZONTAL_PADDING;
-  const paddingY = Math.round(fontSize * CAPTION_VERTICAL_PADDING_RATIO);
-  const lineHeight = Math.round(fontSize * CAPTION_LINE_HEIGHT_RATIO);
-  const bandWidth = width;
-  const x = 0;
-
-  const trackingPx = fontSize * CAPTION_TRACKING_EM;
-
-  ctx.font = `${CAPTION_FONT_WEIGHT} ${fontSize}px ${CAPTION_FONT_FAMILY}`;
-  ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
-
-  const lines = wrapCaption(ctx, caption, bandWidth - paddingX * 2, trackingPx, fontSize);
-  const bandHeight = Math.round(lines.length * lineHeight + paddingY * 2);
-  const y = Math.round(height * (topPercent / 100) - bandHeight / 2);
-
-  ctx.fillStyle = `rgba(0, 0, 0, ${CAPTION_BAR_ALPHA})`;
-  ctx.fillRect(x, y, bandWidth, bandHeight);
-
-  ctx.fillStyle = "#fff";
-  ctx.shadowColor = "transparent";
-  ctx.shadowBlur = 0;
-  ctx.shadowOffsetX = 0;
-  ctx.shadowOffsetY = 0;
-  lines.forEach((line, index) => {
-    const textY = y + paddingY + lineHeight / 2 + index * lineHeight;
-    drawTrackedText(ctx, line, width / 2, textY, trackingPx, fontSize);
-  });
+  ctx.drawImage(captionOverlay.image, 0, 0, width, height);
   ctx.restore();
 }
 
 function drawFrame(ctx, video, options, effects = {}) {
-  const { caption, captionSize, captionTop, videoFitMode, width, height } = options;
+  const { captionOverlay, videoFitMode, width, height } = options;
   const { brightness = 1, warmth = 0 } = effects;
   drawVideoFit(ctx, video, width, height, brightness, videoFitMode);
   if (warmth > 0) {
     ctx.fillStyle = `rgba(255, 212, 92, ${percentToDecimal(warmth)})`;
     ctx.fillRect(0, 0, width, height);
   }
-  drawCaption(ctx, caption, captionSize, captionTop, width, height);
+  drawCaptionOverlay(ctx, captionOverlay, width, height);
 }
 
 function drawVideoSegment(video, ctx, options, startTime, endTime, onProgress) {
@@ -550,7 +552,6 @@ function drawStillFramePause(video, ctx, options, milliseconds, onProgress, effe
 async function renderSequence({
   clips,
   caption,
-  captionSize,
   captionTop,
   videoFitMode,
   useSwitchEffect,
@@ -600,10 +601,14 @@ async function renderSequence({
   const mediaStream = new MediaStream(streamTracks);
   const recorder = new MediaRecorder(mediaStream, { mimeType });
   const chunks = [];
-  const options = {
+  const captionOverlay = await createCaptionOverlay({
     caption,
-    captionSize,
     captionTop,
+    width: OUTPUT_WIDTH,
+    height: OUTPUT_HEIGHT,
+  });
+  const options = {
+    captionOverlay,
     videoFitMode,
     width: OUTPUT_WIDTH,
     height: OUTPUT_HEIGHT,
@@ -711,6 +716,7 @@ async function renderSequence({
     if (recorderStarted && recorder.state !== "inactive") {
       recorder.stop();
     }
+    cleanupCaptionOverlay(captionOverlay);
     streamTracks.forEach((track) => track.stop());
     if (audioContext) await audioContext.close();
   }
@@ -1424,7 +1430,7 @@ function PhonePreview({
   };
 
   const captionStyle = {
-    fontSize: `${Math.max(17, Math.round(CAPTION_FONT_SIZE / 4.25))}px`,
+    fontSize: `${getPreviewCaptionFontSize()}px`,
     top: `${captionTop}%`,
     fontFamily: CAPTION_FONT_FAMILY,
     fontWeight: CAPTION_FONT_WEIGHT,
@@ -1959,7 +1965,6 @@ export default function App() {
       const result = await renderSequence({
         clips,
         caption,
-        captionSize: CAPTION_FONT_SIZE,
         captionTop,
         videoFitMode,
         useSwitchEffect,
